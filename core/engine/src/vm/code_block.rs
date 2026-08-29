@@ -14,6 +14,7 @@ use bitflags::bitflags;
 use boa_ast::scope::{BindingLocator, Scope};
 use boa_gc::{Finalize, Gc, Trace, empty_trace};
 use itertools::Itertools;
+use rustc_hash::FxHashSet;
 use std::{cell::Cell, fmt::Display, fmt::Write as _};
 use thin_vec::ThinVec;
 
@@ -211,6 +212,38 @@ impl CodeBlock {
     #[must_use]
     pub fn name(&self) -> &JsString {
         self.source_info.function_name()
+    }
+
+    /// Clears the inline caches of this code block and of every function nested in it.
+    ///
+    /// Compiled code holds no reference to the realm that ran it *except* through
+    /// these caches, so this is what makes a [`CodeBlock`] safe to hand to a
+    /// second realm without carrying the first one's measured behaviour into it.
+    /// See [`Script::bind_to_realm`](crate::Script::bind_to_realm).
+    ///
+    /// Iterative rather than recursive: nesting depth here is a property of the
+    /// source, and a deeply nested script must not be able to exhaust the stack.
+    /// The visited set guards against a constant graph that is not a tree, which
+    /// the compiler does not currently produce but which this must not rely on.
+    /// It is a hash set rather than a list because this runs once per realm over
+    /// every function in the script, and a linear scan would make that quadratic.
+    pub(crate) fn clear_inline_caches(block: &Gc<Self>) {
+        let mut seen: FxHashSet<u64> = FxHashSet::default();
+        seen.insert(block.debug_id);
+        let mut pending: Vec<Gc<Self>> = vec![block.clone()];
+
+        while let Some(block) = pending.pop() {
+            for cache in &block.ic {
+                cache.clear();
+            }
+            for constant in &block.constants {
+                if let Constant::Function(nested) = constant
+                    && seen.insert(nested.debug_id)
+                {
+                    pending.push(nested.clone());
+                }
+            }
+        }
     }
 
     /// Retrieves the path of this code block.

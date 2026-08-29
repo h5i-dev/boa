@@ -13,6 +13,7 @@ mod iterators;
 mod job;
 mod operators;
 mod promise;
+mod script;
 mod spread;
 mod to_string;
 

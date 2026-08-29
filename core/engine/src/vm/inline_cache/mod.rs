@@ -62,6 +62,20 @@ impl InlineCache {
         }
     }
 
+    /// Forgets everything this site has learned, including that it was megamorphic.
+    ///
+    /// Cached entries are weak and matched by shape identity, so a stale one can
+    /// never be *hit* by an object from a different realm — it is dropped on the
+    /// next lookup instead. The flag is the reason this exists: once an access
+    /// site has gone megamorphic it stays that way for the life of the code
+    /// block, so compiled code reused across realms would accumulate the shape
+    /// variety of every realm it had ever run in and eventually stop caching
+    /// altogether. See [`Script::bind_to_realm`](crate::Script::bind_to_realm).
+    pub(crate) fn clear(&self) {
+        self.entries.borrow_mut().clear();
+        self.megamorphic.set(false);
+    }
+
     pub(crate) fn set(&self, shape: &Shape, slot: Slot) {
         if self.megamorphic.get() {
             return;

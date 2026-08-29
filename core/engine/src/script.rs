@@ -19,7 +19,7 @@ use crate::{
     Context, HostDefined, JsResult, JsString, JsValue, Module, SpannedSourceText,
     bytecompiler::{ByteCompiler, global_declaration_instantiation_context},
     environments::EnvironmentStack,
-    js_string,
+    js_error, js_string,
     realm::Realm,
     spanned_source_text::SourceText,
     vm::{ActiveRunnable, CallFrame, CallFrameFlags, CodeBlock},
@@ -165,6 +165,77 @@ impl Script {
         *self.inner.phase.borrow_mut() = ScriptPhase::Codeblock(cb.clone());
 
         Ok(cb)
+    }
+
+    /// Returns a script that shares this one's compiled code but runs in `realm`.
+    ///
+    /// Parsing and compiling a large script is not cheap, and an embedder that
+    /// gives every document a realm of its own — a browser, a sandbox per
+    /// request — pays that price again for every one of them, for identical
+    /// source. This compiles once and hands the result to as many realms as
+    /// asked, without weakening the isolation between them: nothing of the
+    /// running state is shared, only the instructions.
+    ///
+    /// The returned script has its own `[[LoadedModules]]` and
+    /// [`\[\[HostDefined\]\]`][`HostDefined`], so a module loaded by one realm is
+    /// not visible to another. The inline caches on the shared code are cleared,
+    /// which is what stops one realm's measured behaviour from following the
+    /// code into the next — see [`CodeBlock::clear_inline_caches`]. Caches are
+    /// keyed on weak shape identity, so a stale entry could never have been
+    /// *hit* by an object from a different realm; what accumulates instead is
+    /// the megamorphic flag, which is permanent and would otherwise leave code
+    /// reused across many realms unable to cache at all.
+    ///
+    /// The script must already be compiled: call [`Script::codeblock`] on it
+    /// first, with the context it was parsed in. Taking no context here is
+    /// deliberate. Compiling resolves the parser's symbols through *a* context's
+    /// interner, and the only one that can resolve them correctly is the one
+    /// that parsed the source, so an API that accepted a context here would
+    /// accept the wrong one and silently compile a script full of unrelated
+    /// identifiers.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `TypeError` if the script has not been compiled yet.
+    ///
+    /// Also refuses a script whose *top level* declares `let`, `const` or
+    /// `class`. Those become bindings in the global declarative scope, and the
+    /// compiler records their position in the scope of the realm it compiled
+    /// against; running such code in a second realm would leave that realm's own
+    /// scope without them, so a script compiled in it afterwards would look for
+    /// them on the global object and not find them. Top-level `var` and
+    /// `function` are fine — they are instantiated by name on the global object,
+    /// which is realm-independent, as is anything wrapped in a function.
+    pub fn bind_to_realm(&self, realm: Realm) -> JsResult<Self> {
+        let codeblock = match &*self.inner.phase.borrow() {
+            ScriptPhase::Codeblock(codeblock) => codeblock.clone(),
+            ScriptPhase::Ast(_) => {
+                return Err(js_error!(
+                    TypeError: "a script must be compiled before it can be bound to another \
+                                realm; call `Script::codeblock` with the context it was parsed in"
+                ));
+            }
+        };
+
+        if !codeblock.global_lexs.is_empty() {
+            return Err(js_error!(
+                TypeError: "a script with top-level lexical declarations cannot be bound to \
+                            another realm"
+            ));
+        }
+
+        CodeBlock::clear_inline_caches(&codeblock);
+
+        Ok(Self {
+            inner: Gc::new(Inner {
+                realm,
+                phase: GcRefCell::new(ScriptPhase::Codeblock(codeblock)),
+                source_text: self.inner.source_text.clone(),
+                loaded_modules: GcRefCell::default(),
+                host_defined: HostDefined::default(),
+                path: self.inner.path.clone(),
+            }),
+        })
     }
 
     /// Evaluates this script and returns its result.
