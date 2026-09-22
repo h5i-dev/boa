@@ -798,8 +798,21 @@ impl RegExp {
         } else {
             let mut s = Vec::with_capacity(src.len());
             let mut buf = [0; 2];
-            for c in src.code_points() {
+            let mut code_points = src.code_points().peekable();
+            while let Some(c) = code_points.next() {
                 match c {
+                    // An escape sequence passes through whole. The `/` in `\/`
+                    // is already escaped, and escaping it again leaves a
+                    // backslash that the next parse reads as a literal one, so
+                    // `new RegExp(re.source)` grew one every round trip and the
+                    // pattern stopped meaning what it said.
+                    CodePoint::Unicode('\\') => {
+                        s.extend_from_slice(utf16!(r"\"));
+                        if matches!(code_points.peek(), Some(CodePoint::Unicode('/'))) {
+                            code_points.next();
+                            s.extend_from_slice(utf16!("/"));
+                        }
+                    }
                     CodePoint::Unicode('/') => s.extend_from_slice(utf16!(r"\/")),
                     CodePoint::Unicode('\n') => s.extend_from_slice(utf16!(r"\n")),
                     CodePoint::Unicode('\r') => s.extend_from_slice(utf16!(r"\r")),
