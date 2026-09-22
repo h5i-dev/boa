@@ -233,7 +233,7 @@ fn typeof_edge_cases() {
                 f();
             "#},
             JsNativeErrorKind::Reference,
-            "access of uninitialized binding",
+            "access of uninitialized binding `x`",
         ),
         TestAction::assert_native_error(
             indoc! {r#"
@@ -244,7 +244,7 @@ fn typeof_edge_cases() {
                 f();
             "#},
             JsNativeErrorKind::Reference,
-            "access of uninitialized binding",
+            "access of uninitialized binding `x`",
         ),
     ]);
 }

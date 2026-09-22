@@ -523,6 +523,15 @@ pub struct ByteCompiler<'ctx> {
 
     pub(crate) local_binding_registers: FxHashMap<IdentifierReference, u32>,
 
+    /// The last local binding that resolved to no register.
+    ///
+    /// Carried so the throw emitted for it can say *which* binding it was.
+    /// `BindingKind::Local(None)` reaches the emitter with the name already
+    /// dropped, and "access of uninitialized binding" with nothing after it
+    /// is the hardest kind of error to act on: it names neither the binding
+    /// nor anything to search for.
+    pub(crate) unresolved_local: Option<JsString>,
+
     /// The current variable scope.
     pub(crate) variable_scope: Scope,
 
@@ -648,6 +657,7 @@ impl<'ctx> ByteCompiler<'ctx> {
 
         Self {
             function_name: name,
+            unresolved_local: None,
             length: 0,
             bytecode: BytecodeEmitter::new(),
             source_map_builder: SourceMapBuilder::default(),
@@ -765,7 +775,11 @@ impl<'ctx> ByteCompiler<'ctx> {
         }
 
         if binding.local() {
-            return BindingKind::Local(self.local_binding_registers.get(binding).copied());
+            let slot = self.local_binding_registers.get(binding).copied();
+            if slot.is_none() {
+                self.unresolved_local = Some(binding.locator().name().clone());
+            }
+            return BindingKind::Local(slot);
         }
 
         if let Some(index) = self.bindings_map.get(&binding.locator()) {
@@ -973,9 +987,15 @@ impl<'ctx> ByteCompiler<'ctx> {
                     .emit_delete_name(value.variable(), (*index).into()),
             },
             BindingKind::Local(None) => {
-                let error_msg = self.get_or_insert_literal(Literal::String(js_string!(
-                    "access of uninitialized binding"
-                )));
+                let message = match &self.unresolved_local {
+                    Some(name) => js_string!(
+                        js_str!("access of uninitialized binding `"),
+                        name,
+                        js_str!("`")
+                    ),
+                    None => js_string!("access of uninitialized binding"),
+                };
+                let error_msg = self.get_or_insert_literal(Literal::String(message));
                 self.bytecode
                     .emit_throw_new_reference_error(error_msg.into());
             }
