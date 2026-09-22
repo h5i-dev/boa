@@ -950,3 +950,28 @@ fn instanceof_custom_has_instance() {
         "#}),
     ]);
 }
+
+/// A `switch` discriminant is not part of the case block's scope.
+///
+/// `LexicallyScopedDeclarations` of a switch comes from its `CaseBlock` alone,
+/// but the visitor had no `visit_switch` and the default walk descended into
+/// the discriminant. A `let` inside a function expression there was collected
+/// as a binding *of the switch*, the case bodies resolved their own reads to
+/// it, and no register was ever allocated for it — so every such read compiled
+/// to an unconditional throw. Minified bundles hit this constantly, because
+/// one-letter names shadow across nested functions as a matter of course.
+#[test]
+fn a_switch_discriminant_does_not_declare_the_case_block() {
+    run_test_actions([TestAction::assert_eq(
+        indoc! {r#"
+            function outer() {
+                let shared = "correct";
+                switch ((function () { let shared; }, 0)) {
+                    case 0: return shared;
+                }
+            }
+            outer();
+        "#},
+        js_str!("correct"),
+    )]);
+}

@@ -1896,6 +1896,23 @@ impl<'ast> Visitor<'ast> for LexicallyScopedDeclarationsVisitor<'_, 'ast> {
         ControlFlow::Continue(())
     }
 
+    // SwitchStatement : switch ( Expression ) CaseBlock
+    fn visit_switch(&mut self, node: &'ast crate::statement::Switch) -> ControlFlow<Self::BreakTy> {
+        // 1. Return the LexicallyScopedDeclarations of CaseBlock.
+        //
+        // The discriminant is evaluated before the case block's scope exists,
+        // so what it declares is not the switch's. Without this the default
+        // walk descended into it, and a `let` inside a function expression
+        // there was collected as a binding *of the switch*. The case bodies
+        // then resolved their own reads to that binding, which no register was
+        // ever allocated for, and the compiler turned each read into an
+        // unconditional throw.
+        for case in node.cases() {
+            self.visit_statement_list(case.body())?;
+        }
+        ControlFlow::Continue(())
+    }
+
     fn visit_statement_list_item(
         &mut self,
         node: &'ast StatementListItem,
