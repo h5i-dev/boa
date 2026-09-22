@@ -64,16 +64,27 @@ fn get_by_name<const LENGTH: bool>(
 
     let key: PropertyKey = ic.name.clone().into();
 
+    // The shape the lookup starts in. `__get__` can run a getter, and a getter
+    // may redefine the very property it was reached through — a lazy field that
+    // replaces itself with its value is the ordinary form of that.
+    let entry_shape = object.borrow().shape().clone();
+
     let context = &mut InternalMethodPropertyContext::new(context);
     let result = object.__get__(&key, receiver.clone(), context)?;
 
-    // Cache the property.
+    // Cache the property, but only against the shape the slot was found in.
+    // The slot describes the property as it *was*; pairing it with the shape
+    // the object ended up in files an accessor's attributes under a data
+    // property, and the next read here calls the value as though it were the
+    // getter.
     let slot = *context.slot();
     if slot.is_cacheable() {
         let ic = &context.vm.frame().code_block.ic[usize::from(index)];
         let object_borrowed = object.borrow();
         let shape = object_borrowed.shape();
-        ic.set(shape, slot);
+        if shape.to_addr_usize() == entry_shape.to_addr_usize() {
+            ic.set(shape, slot);
+        }
     }
 
     context.vm.set_register(dst.into(), result);

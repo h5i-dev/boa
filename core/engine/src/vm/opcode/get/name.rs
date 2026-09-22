@@ -85,6 +85,10 @@ impl GetNameGlobal {
 
             let key: PropertyKey = ic.name.clone().into();
 
+            // See `get_by_name`: a getter run by the lookup may leave the
+            // object in a different shape than the slot was found in.
+            let entry_shape = object.borrow().shape().clone();
+
             let context = &mut InternalMethodPropertyContext::new(context);
             let Some(result) = object.__try_get__(&key, object.clone().into(), context)? else {
                 let name = binding_locator.name().to_std_string_escaped();
@@ -99,7 +103,9 @@ impl GetNameGlobal {
                 let ic = &context.vm.frame().code_block.ic[usize::from(ic_index)];
                 let object_borrowed = object.borrow();
                 let shape = object_borrowed.shape();
-                ic.set(shape, slot);
+                if shape.to_addr_usize() == entry_shape.to_addr_usize() {
+                    ic.set(shape, slot);
+                }
             }
 
             context.vm.set_register(dst.into(), result);

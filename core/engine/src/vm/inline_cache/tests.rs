@@ -2,7 +2,7 @@ use boa_gc::Gc;
 use boa_parser::Source;
 
 use crate::{
-    Context, JsObject, JsResult, JsValue,
+    Context, JsObject, JsResult, JsValue, TestAction,
     builtins::{OrdinaryObject, function::OrdinaryFunction},
     js_string,
     object::{
@@ -10,6 +10,7 @@ use crate::{
         shape::slot::SlotAttributes,
     },
     property::{Attribute, PropertyDescriptor, PropertyKey},
+    run_test_actions,
     vm::CodeBlock,
 };
 
@@ -464,4 +465,33 @@ fn test_megamorphic_inline_cache() -> JsResult<()> {
     assert!(code.ic[0].megamorphic.get());
 
     Ok(())
+}
+
+/// A getter may redefine the property it was reached through, and the slot it
+/// was found in must not be filed under the shape the object ended up in.
+///
+/// A lazy field that replaces itself with its value is the ordinary form of
+/// this. Reading it twice through one call site cached "accessor" against
+/// storage that by then held the value, and the second read called the value
+/// as though it were the getter — `TypeError: not a callable function` on a
+/// property that had just answered correctly.
+#[test]
+fn a_getter_that_replaces_itself_does_not_poison_the_cache() {
+    run_test_actions([TestAction::assert_eq(
+        indoc::indoc! {r#"
+            function read(o) { return o.shape; }
+            const src = { a: 1, b: 2 };
+            const o = { type: "object", shape: src };
+            Object.defineProperty(o, "shape", {
+                configurable: true,
+                get() {
+                    const v = { ...src };
+                    Object.defineProperty(o, "shape", { value: v, configurable: true });
+                    return v;
+                },
+            });
+            Object.keys(read(o)).join("") + "|" + Object.keys(read(o)).join("");
+        "#},
+        boa_macros::js_str!("ab|ab"),
+    )]);
 }

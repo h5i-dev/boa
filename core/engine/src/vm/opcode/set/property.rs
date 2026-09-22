@@ -62,6 +62,10 @@ fn set_by_name(
 
     let name: PropertyKey = ic.name.clone().into();
 
+    // A setter is user code too, and may redefine what it was reached through.
+    // See `get_by_name`.
+    let entry_shape = object.borrow().shape().clone();
+
     let context = &mut InternalMethodPropertyContext::new(context);
     let succeeded = object.__set__(name.clone(), value.clone(), receiver.clone(), context)?;
     if !succeeded && context.vm.frame().code_block.strict() {
@@ -76,7 +80,9 @@ fn set_by_name(
         let ic = &context.vm.frame().code_block.ic[usize::from(index)];
         let object_borrowed = object.borrow();
         let shape = object_borrowed.shape();
-        ic.set(shape, slot);
+        if shape.to_addr_usize() == entry_shape.to_addr_usize() {
+            ic.set(shape, slot);
+        }
     }
 
     Ok(())
