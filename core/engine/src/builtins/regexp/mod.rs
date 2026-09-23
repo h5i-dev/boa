@@ -26,6 +26,9 @@ use boa_gc::{Finalize, Trace};
 use boa_macros::{js_str, utf16};
 use boa_parser::lexer::regex::RegExpFlags;
 use regress::{Flags, Range, Regex};
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
 use std::str::FromStr;
 
 use super::{BuiltInBuilder, BuiltInConstructor, IntrinsicObject};
@@ -40,8 +43,9 @@ mod tests;
 // Safety: `RegExp` does not contain any objects which needs to be traced, so this is safe.
 #[boa_gc(unsafe_empty_trace)]
 pub struct RegExp {
-    /// Regex matcher.
-    matcher: Regex,
+    /// Regex matcher, shared with every other `RegExp` compiled from the
+    /// same source and flags.
+    matcher: Rc<Regex>,
     flags: RegExpFlags,
     original_source: JsString,
     original_flags: JsString,
@@ -351,38 +355,7 @@ impl RegExp {
         // 13. Let parseResult be ParsePattern(patternText, u, v).
         // 14. If parseResult is a non-empty List of SyntaxError objects, throw a SyntaxError exception.
 
-        // If u or v flag is set, fullUnicode is true — compile as full codepoints.
-        let full_unicode =
-            flags.contains(RegExpFlags::UNICODE) || flags.contains(RegExpFlags::UNICODE_SETS);
-
-        let matcher = if full_unicode {
-            // Unicode mode (u/v flag) OR pattern has named groups:
-            // compile as full Unicode codepoints.
-            Regex::from_unicode(p.code_points().map(CodePoint::as_u32), Flags::from(flags))
-                .map_err(|error| {
-                    JsNativeError::syntax()
-                        .with_message(format!("failed to create matcher: {}", error.text))
-                })?
-        } else {
-            // Non-Unicode mode with no named groups:
-            // compile as raw UTF-16 code units so that surrogate pairs
-            // (e.g. 𠮷 = [0xD842, 0xDFB7]) are matched correctly by find_from_ucs2.
-            let utf16_units = p.code_points().flat_map(|cp| {
-                let mut buf = [0u16; 2];
-                match cp {
-                    CodePoint::Unicode(c) => c
-                        .encode_utf16(&mut buf)
-                        .iter()
-                        .map(|&u| u32::from(u))
-                        .collect::<Vec<_>>(),
-                    CodePoint::UnpairedSurrogate(s) => vec![u32::from(s)],
-                }
-            });
-            Regex::from_unicode(utf16_units, Flags::from(flags)).map_err(|error| {
-                JsNativeError::syntax()
-                    .with_message(format!("failed to create matcher: {}", error.text))
-            })?
-        };
+        let matcher = compile_pattern(&p, flags)?;
 
         // 15. Assert: parseResult is a Pattern Parse Node.
         // 16. Set obj.[[OriginalSource]] to P.
@@ -1144,7 +1117,7 @@ impl RegExp {
         }
 
         // 8. Let matcher be R.[[RegExpMatcher]].
-        let matcher = &rx.matcher;
+        let matcher = &*rx.matcher;
 
         // 9. If flags contains "u" or flags contains "v", let fullUnicode be true; else let fullUnicode be false.
         let full_unicode = flags.contains(b'u') || flags.contains(b'v');
@@ -2147,4 +2120,66 @@ fn advance_string_index(s: &JsString, index: u64, unicode: bool) -> u64 {
     let code_point = s.code_point_at(index as usize);
 
     index + code_point.code_unit_count() as u64
+}
+
+/// How many compiled patterns one thread keeps. A page that builds regexes
+/// out of its data has no bounded set of them, so the table is dropped whole
+/// once it reaches this rather than grown without limit.
+const PATTERN_CACHE_CAP: usize = 4096;
+
+thread_local! {
+    /// Patterns already compiled on this thread, keyed by source and flags.
+    static PATTERN_CACHE: RefCell<HashMap<(JsString, u8), Rc<Regex>>> =
+        RefCell::new(HashMap::new());
+}
+
+/// Compile `pattern` under `flags`, reusing an earlier compilation of the same
+/// two. A regex literal is compiled afresh on every evaluation otherwise, so a
+/// pattern inside a hot function is rebuilt from its source on every call.
+fn compile_pattern(pattern: &JsString, flags: RegExpFlags) -> JsResult<Rc<Regex>> {
+    let key = (pattern.clone(), flags.bits());
+    if let Some(hit) = PATTERN_CACHE.with(|c| c.borrow().get(&key).cloned()) {
+        return Ok(hit);
+    }
+
+    // If u or v flag is set, fullUnicode is true — compile as full codepoints.
+    let full_unicode =
+        flags.contains(RegExpFlags::UNICODE) || flags.contains(RegExpFlags::UNICODE_SETS);
+
+    let matcher = if full_unicode {
+        // Unicode mode (u/v flag) OR pattern has named groups:
+        // compile as full Unicode codepoints.
+        Regex::from_unicode(
+            pattern.code_points().map(CodePoint::as_u32),
+            Flags::from(flags),
+        )
+    } else {
+        // Non-Unicode mode with no named groups:
+        // compile as raw UTF-16 code units so that surrogate pairs
+        // (e.g. 𠮷 = [0xD842, 0xDFB7]) are matched correctly by find_from_ucs2.
+        let utf16_units = pattern.code_points().flat_map(|cp| {
+            let mut buf = [0u16; 2];
+            match cp {
+                CodePoint::Unicode(c) => c
+                    .encode_utf16(&mut buf)
+                    .iter()
+                    .map(|&u| u32::from(u))
+                    .collect::<Vec<_>>(),
+                CodePoint::UnpairedSurrogate(s) => vec![u32::from(s)],
+            }
+        });
+        Regex::from_unicode(utf16_units, Flags::from(flags))
+    };
+    let matcher = Rc::new(matcher.map_err(|error| {
+        JsNativeError::syntax().with_message(format!("failed to create matcher: {}", error.text))
+    })?);
+
+    PATTERN_CACHE.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.len() >= PATTERN_CACHE_CAP {
+            c.clear();
+        }
+        c.insert(key, Rc::clone(&matcher));
+    });
+    Ok(matcher)
 }
